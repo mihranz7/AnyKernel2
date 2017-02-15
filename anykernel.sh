@@ -1,33 +1,146 @@
-# AnyKernel2 Ramdisk Mod Script
+# AnyKernel 2.0 Ramdisk Mod Script 
 # osm0sis @ xda-developers
 
 ## AnyKernel setup
 # EDIFY properties
-kernel.string=DirtyV by bsmitty83 @ xda-developers
+kernel.string=Toy-Story kernel(Derived from Team-M8 kernel)
 do.devicecheck=1
-do.initd=1
+do.initd=0
 do.modules=0
-do.cleanup=1
-device.name1=maguro
-device.name2=toro
-device.name3=toroplus
-device.name4=
-device.name5=
+do.cleanup=0
+device.name1=m8
+device.name2=m8whl
+device.name3=m8wl
+device.name4=m8ul
+device.name5=m8dugl
 
 # shell variables
-block=/dev/block/platform/omap/omap_hsmmc.0/by-name/boot;
-is_slot_device=0;
+block=/dev/block/platform/msm_sdcc.1/by-name/boot;
+
+## end setup
 
 
 ## AnyKernel methods (DO NOT CHANGE)
-# import patching functions/variables - see for reference
-. /tmp/anykernel/tools/ak2-core.sh;
+# set up extracted files and directories
+ramdisk=/tmp/anykernel/ramdisk;
+bin=/tmp/anykernel/tools;
+split_img=/tmp/anykernel/split_img;
+patch=/tmp/anykernel/patch;
+
+mkdir -p $ramdisk $split_img;
+chmod -R 755 $bin;
+cd $ramdisk;
+
+OUTFD=`ps | grep -v "grep" | grep -oE "update(.*)" | cut -d" " -f3`;
+ui_print() { echo "ui_print $1" >&$OUTFD; echo "ui_print" >&$OUTFD; }
+
+# dump boot and extract ramdisk
+dump_boot() {
+  dd if=$block of=/tmp/anykernel/boot.img;
+  $bin/unpackbootimg -i /tmp/anykernel/boot.img -o $split_img;
+  if [ $? != 0 ]; then
+    ui_print " "; ui_print "Dumping/unpacking image failed. Aborting...";
+    echo 1 > /tmp/anykernel/exitcode; exit;
+  fi;
+  gunzip -c $split_img/boot.img-ramdisk.gz | cpio -i;
+}
+
+# repack ramdisk then build and write image
+write_boot() {
+  cd $split_img;
+  cmdline=`cat *-cmdline`;
+  board=`cat *-board`;
+  base=`cat *-base`;
+  pagesize=`cat *-pagesize`;
+  kerneloff=`cat *-kerneloff`;
+  ramdiskoff=`cat *-ramdiskoff`;
+  tagsoff=`cat *-tagsoff`;
+  if [ -f *-second ]; then
+    second=`ls *-second`;
+    second="--second $split_img/$second";
+    secondoff=`cat *-secondoff`;
+    secondoff="--second_offset $secondoff";
+  fi;
+  if [ -f *-dtb ]; then
+    dtb=`ls *-dtb`;
+    dtb="--dt $split_img/$dtb";
+  fi;
+  cd $ramdisk;
+  find . | cpio -H newc -o | gzip > /tmp/anykernel/ramdisk-new.cpio.gz;
+  $bin/mkbootimg --kernel /tmp/anykernel/zImage --ramdisk /tmp/anykernel/ramdisk-new.cpio.gz $second --cmdline "$cmdline" --board "$board" --base $base --pagesize $pagesize --kernel_offset $kerneloff --ramdisk_offset $ramdiskoff $secondoff --tags_offset $tagsoff $dtb --output /tmp/anykernel/boot-new.img;
+  if [ $? != 0 -o `wc -c < /tmp/anykernel/boot-new.img` -gt `wc -c < /tmp/anykernel/boot.img` ]; then
+    ui_print " "; ui_print "Repacking image failed. Aborting...";
+    echo 1 > /tmp/anykernel/exitcode; exit;
+  fi;
+  dd if=/tmp/anykernel/boot-new.img of=$block;
+}
+
+# backup_file <file>
+backup_file() { cp $1 $1~; }
+
+# replace_string <file> <if search string> <original string> <replacement string>
+replace_string() {
+  if [ -z "$(grep "$2" $1)" ]; then
+      sed -i "s;${3};${4};" $1;
+  fi;
+}
+
+# insert_line <file> <if search string> <before/after> <line match string> <inserted line>
+insert_line() {
+  if [ -z "$(grep "$2" $1)" ]; then
+    case $3 in
+      before) offset=0;;
+      after) offset=1;;
+    esac;
+    line=$((`grep -n "$4" $1 | cut -d: -f1` + offset));
+    sed -i "${line}s;^;${5};" $1;
+  fi;
+}
+
+# replace_line <file> <line replace string> <replacement line>
+replace_line() {
+  if [ ! -z "$(grep "$2" $1)" ]; then
+    line=`grep -n "$2" $1 | cut -d: -f1`;
+    sed -i "${line}s;.*;${3};" $1;
+  fi;
+}
+
+# remove_line <file> <line match string>
+remove_line() {
+  if [ ! -z "$(grep "$2" $1)" ]; then
+    line=`grep -n "$2" $1 | cut -d: -f1`;
+    sed -i "${line}d" $1;
+  fi;
+}
+
+# prepend_file <file> <if search string> <patch file>
+prepend_file() {
+  if [ -z "$(grep "$2" $1)" ]; then
+    echo "$(cat $patch/$3 $1)" > $1;
+  fi;
+}
+
+# append_file <file> <if search string> <patch file>
+append_file() {
+  if [ -z "$(grep "$2" $1)" ]; then
+    echo -ne "\n" >> $1;
+    cat $patch/$3 >> $1;
+    echo -ne "\n" >> $1;
+  fi;
+}
+
+# replace_file <file> <permissions> <patch file>
+replace_file() {
+  cp -fp $patch/$3 $1;
+  chmod $2 $1;
+}
+
+## end methods
 
 
 ## AnyKernel permissions
-# set permissions for included ramdisk files
-chmod -R 755 $ramdisk
-chmod 644 $ramdisk/sbin/media_profiles.xml
+# set permissions for included files
+#chmod -R 755 $ramdisk
 
 
 ## AnyKernel install
@@ -36,35 +149,12 @@ dump_boot;
 # begin ramdisk changes
 
 # init.rc
-backup_file init.rc;
-replace_string init.rc "cpuctl cpu,timer_slack" "mount cgroup none /dev/cpuctl cpu" "mount cgroup none /dev/cpuctl cpu,timer_slack";
-append_file init.rc "run-parts" init;
 
-# init.tuna.rc
-backup_file init.tuna.rc;
-insert_line init.tuna.rc "nodiratime barrier=0" after "mount_all /fstab.tuna" "\tmount ext4 /dev/block/platform/omap/omap_hsmmc.0/by-name/userdata /data remount nosuid nodev noatime nodiratime barrier=0";
-append_file init.tuna.rc "dvbootscript" init.tuna;
-
-# init.superuser.rc
-if [ -f init.superuser.rc ]; then
-  backup_file init.superuser.rc;
-  replace_string init.superuser.rc "Superuser su_daemon" "# su daemon" "\n# Superuser su_daemon";
-  prepend_file init.superuser.rc "SuperSU daemonsu" init.superuser;
-else
-  replace_file init.superuser.rc 750 init.superuser.rc;
-  insert_line init.rc "init.superuser.rc" after "on post-fs-data" "    import /init.superuser.rc";
-fi;
-
-# fstab.tuna
-backup_file fstab.tuna;
-patch_fstab fstab.tuna /system ext4 options "nodiratime,barrier=0" "nodev,noatime,nodiratime,barrier=0,data=writeback,noauto_da_alloc,discard";
-patch_fstab fstab.tuna /cache ext4 options "barrier=0,nomblk_io_submit" "nosuid,nodev,noatime,nodiratime,errors=panic,barrier=0,nomblk_io_submit,data=writeback,noauto_da_alloc";
-patch_fstab fstab.tuna /data ext4 options "nomblk_io_submit,data=writeback" "nosuid,nodev,noatime,errors=panic,nomblk_io_submit,data=writeback,noauto_da_alloc";
-append_file fstab.tuna "usbdisk" fstab;
 
 # end ramdisk changes
+
+cp -f /tmp/anykernel/dtb $split_img/boot.img-dtb
 
 write_boot;
 
 ## end install
-
